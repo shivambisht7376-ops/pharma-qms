@@ -1,262 +1,422 @@
 import React, { useState } from 'react';
-import { User, ComplaintData, RiskAssessment, ChatMessage, AuditLogEntry } from './types';
+import { useDispatch, useSelector } from 'react-redux';
+import { RootState, AppDispatch } from './store';
+import { User, ComplaintData, RiskAssessment, ChatMessage } from './types';
 import { DEMO_USERS, INITIAL_EMPTY_COMPLAINT, INITIAL_EMPTY_RISK, SAMPLE_HISTORICAL_COMPLAINTS } from './data/mockData';
+import {
+  setComplaint,
+  setRiskAssessment,
+  setRecentlyUpdatedFields,
+  clearForm,
+  addOrUpdateMasterComplaint,
+  loadComplaintIntoForm,
+  setMasterComplaints,
+} from './store/complaintSlice';
+import { addMessage, clearChat, setProcessing } from './store/chatSlice';
+import { addAuditLog } from './store/auditSlice';
 import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { ComplaintForm } from './components/ComplaintForm';
 import { AiCopilotAssistant } from './components/AiCopilotAssistant';
 import { ComplaintsMasterLog } from './components/ComplaintsMasterLog';
 import { AuditLogView } from './components/AuditLogView';
-import { CheckCircle2, ShieldAlert, Sparkles, X } from 'lucide-react';
+import { CheckCircle2 } from 'lucide-react';
+
+const API_BASE = '/api';
 
 export default function App() {
-  // Current Authenticated User (Defaults to QA Manager)
+  const dispatch = useDispatch<AppDispatch>();
+
+  // Redux state
+  const { complaint, riskAssessment, recentlyUpdatedFields, masterComplaints } = useSelector(
+    (state: RootState) => state.complaint
+  );
+  const { chatHistory, isProcessing } = useSelector((state: RootState) => state.chat);
+  const { auditLogs } = useSelector((state: RootState) => state.audit);
+
+  // Local UI state
   const [currentUser, setCurrentUser] = useState<User | null>(DEMO_USERS[1]);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-
-  // Active View Tab
   const [activeTab, setActiveTab] = useState<'copilot' | 'master_log' | 'audit_log'>('copilot');
-
-  // Active Complaint Form State
-  const [complaint, setComplaint] = useState<ComplaintData>(INITIAL_EMPTY_COMPLAINT);
-  const [riskAssessment, setRiskAssessment] = useState<RiskAssessment>(INITIAL_EMPTY_RISK);
-  const [recentlyUpdatedFields, setRecentlyUpdatedFields] = useState<string[]>([]);
-
-  // AI Co-pilot Chat Conversation
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  // Master Complaints Database List
-  const [masterComplaints, setMasterComplaints] = useState<{ complaint: ComplaintData; risk: RiskAssessment }[]>(
-    SAMPLE_HISTORICAL_COMPLAINTS
-  );
-
-  // GMP Audit Trail Logs
-  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([
-    {
-      id: 'aud-001',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      user: 'System Initialization',
-      action: 'SYSTEM_READY',
-      details: 'Pharma QMS AI Co-pilot Engine initialized. 21 CFR Part 11 Audit Trail Active.',
-    },
-    {
-      id: 'aud-002',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      user: 'Elena Vance (QA Complaint Manager)',
-      action: 'USER_LOGIN',
-      details: 'Logged into QMS Workspace with QA Manager credentials.',
-    },
-  ]);
-
-  // Notifications / Toast Feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastType, setToastType] = useState<'success' | 'error'>('success');
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage(null);
-    }, 4000);
+    setToastType(type);
+    setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Helper to log audit trail
-  const addAuditLog = (action: string, details: string, fieldModified?: string) => {
-    const newLog: AuditLogEntry = {
+  const logAudit = (action: string, details: string, fieldModified?: string) => {
+    dispatch(addAuditLog({
       id: `aud-${Date.now()}`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      user: currentUser ? `${currentUser.name} (${currentUser.roleLabel})` : 'Anonymous User',
+      user: currentUser ? `${currentUser.name} (${currentUser.roleLabel})` : 'Anonymous',
       action,
       details,
       fieldModified,
-    };
-    setAuditLogs((prev) => [newLog, ...prev]);
+    }));
   };
 
-  // Send message to Gemini Express backend
+  // ── Send message to FastAPI LangGraph backend ──────────────────────────────
   const handleSendMessage = async (
     text: string,
     fileAttachment?: { name: string; mimeType: string; size: number; base64Data: string }
   ) => {
-    const userMsgId = `msg-${Date.now()}`;
-    const userMessage: ChatMessage = {
-      id: userMsgId,
+    const userMsg: ChatMessage = {
+      id: `msg-${Date.now()}`,
       sender: 'user',
       text,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      attachment: fileAttachment ? { name: fileAttachment.name, mimeType: fileAttachment.mimeType, size: fileAttachment.size } : undefined,
+      attachment: fileAttachment
+        ? { name: fileAttachment.name, mimeType: fileAttachment.mimeType, size: fileAttachment.size }
+        : undefined,
     };
-
-    setChatHistory((prev) => [...prev, userMessage]);
-    setIsProcessing(true);
+    dispatch(addMessage(userMsg));
+    dispatch(setProcessing(true));
 
     try {
-      const response = await fetch('/api/copilot/process', {
+      // Build camelCase → snake_case compatible payload
+      const currentComplaintPayload = complaint.customerName || complaint.productName ? {
+        customer_name: complaint.customerName,
+        customer_type: complaint.customerType,
+        reporter_contact: complaint.reporterContact,
+        product_name: complaint.productName,
+        product_type: complaint.productType,
+        product_strength_grade: complaint.productStrengthGrade,
+        batch_lot_number: complaint.batchLotNumber,
+        mfg_date: complaint.mfgDate,
+        exp_date: complaint.expDate,
+        affected_quantity: complaint.affectedQuantity,
+        complaint_description: complaint.complaintDescription,
+        defect_category: complaint.defectCategory,
+        packaging_condition: complaint.packagingCondition,
+        storage_condition: complaint.storageCondition,
+        adverse_event: complaint.adverseEvent,
+        adverse_event_details: complaint.adverseEventDetails,
+      } : null;
+
+      const currentRiskPayload = riskAssessment.severity ? {
+        severity: riskAssessment.severity,
+        risk_level: riskAssessment.riskLevel,
+        suggested_routing: riskAssessment.suggestedRouting,
+        root_cause_hypothesis: riskAssessment.rootCauseHypothesis,
+        rationale: riskAssessment.rationale,
+        capa_required: riskAssessment.capaRequired,
+        recommended_actions: riskAssessment.recommendedActions,
+      } : null;
+
+      const body: Record<string, any> = {
+        prompt: text,
+        current_complaint: currentComplaintPayload,
+        current_risk: currentRiskPayload,
+        user_role: currentUser?.roleLabel || 'QA Manager',
+      };
+
+      if (fileAttachment) {
+        body.file = {
+          name: fileAttachment.name,
+          mime_type: fileAttachment.mimeType,
+          size: fileAttachment.size,
+          base64_data: fileAttachment.base64Data,
+        };
+      }
+
+      const response = await fetch(`${API_BASE}/copilot/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: text,
-          currentComplaint: complaint.customerName || complaint.productName ? complaint : null,
-          currentRisk: riskAssessment.severity ? riskAssessment : null,
-          file: fileAttachment,
-          userRole: currentUser?.roleLabel || 'QA Manager',
-        }),
+        body: JSON.stringify(body),
       });
 
       const resData = await response.json();
 
-      if (!resData.success) {
-        throw new Error(resData.error || 'Server error in processing AI co-pilot request');
+      if (!response.ok) {
+        throw new Error(resData.detail || 'Server error in processing AI co-pilot request');
       }
 
-      const aiData = resData.data;
+      const aiData = resData;
+      const cmp = aiData.complaint || {};
+      const risk = aiData.risk_assessment || {};
+      const updatedFields: string[] = aiData.updated_fields || [];
 
-      // Ensure complaint ID & reference number exist
-      const generatedCompNo = complaint.complaintNumber || `CMP-2026-${Math.floor(1000 + Math.random() * 9000)}`;
-      const updatedComplaintObj: ComplaintData = {
+      // Merge with existing complaint
+      const generatedCompNo = complaint.complaintNumber || `CMP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const updatedComplaint: ComplaintData = {
         ...INITIAL_EMPTY_COMPLAINT,
         ...complaint,
-        ...aiData.complaint,
         id: complaint.id || `cmp-${Date.now()}`,
         complaintNumber: generatedCompNo,
         status: complaint.status === 'Draft' ? 'Logged' : complaint.status,
         dateLogged: complaint.dateLogged || new Date().toISOString().split('T')[0],
         lastUpdated: new Date().toISOString().split('T')[0],
+        // Apply AI-extracted fields (only non-null ones)
+        ...(cmp.customer_name != null && { customerName: cmp.customer_name }),
+        ...(cmp.customer_type != null && { customerType: cmp.customer_type }),
+        ...(cmp.reporter_contact != null && { reporterContact: cmp.reporter_contact }),
+        ...(cmp.product_name != null && { productName: cmp.product_name }),
+        ...(cmp.product_type != null && { productType: cmp.product_type }),
+        ...(cmp.product_strength_grade != null && { productStrengthGrade: cmp.product_strength_grade }),
+        ...(cmp.batch_lot_number != null && { batchLotNumber: cmp.batch_lot_number }),
+        ...(cmp.mfg_date != null && { mfgDate: cmp.mfg_date }),
+        ...(cmp.exp_date != null && { expDate: cmp.exp_date }),
+        ...(cmp.affected_quantity != null && { affectedQuantity: cmp.affected_quantity }),
+        ...(cmp.complaint_description != null && { complaintDescription: cmp.complaint_description }),
+        ...(cmp.defect_category != null && { defectCategory: cmp.defect_category }),
+        ...(cmp.packaging_condition != null && { packagingCondition: cmp.packaging_condition }),
+        ...(cmp.storage_condition != null && { storageCondition: cmp.storage_condition }),
+        ...(cmp.adverse_event != null && { adverseEvent: cmp.adverse_event }),
+        ...(cmp.adverse_event_details != null && { adverseEventDetails: cmp.adverse_event_details }),
       };
 
-      const updatedRiskObj: RiskAssessment = {
+      const updatedRisk: RiskAssessment = {
         ...INITIAL_EMPTY_RISK,
         ...riskAssessment,
-        ...aiData.riskAssessment,
+        ...(risk.severity != null && { severity: risk.severity }),
+        ...(risk.risk_level != null && { riskLevel: risk.risk_level }),
+        ...(risk.suggested_routing != null && { suggestedRouting: risk.suggested_routing }),
+        ...(risk.root_cause_hypothesis != null && { rootCauseHypothesis: risk.root_cause_hypothesis }),
+        ...(risk.rationale != null && { rationale: risk.rationale }),
+        ...(risk.capa_required != null && { capaRequired: risk.capa_required }),
+        ...(risk.recommended_actions != null && { recommendedActions: risk.recommended_actions }),
       };
 
-      // Update state
-      setComplaint(updatedComplaintObj);
-      setRiskAssessment(updatedRiskObj);
+      dispatch(setComplaint(updatedComplaint));
+      dispatch(setRiskAssessment(updatedRisk));
+      dispatch(setRecentlyUpdatedFields(updatedFields));
 
-      const modifiedFields = aiData.updatedFields || [];
-      setRecentlyUpdatedFields(modifiedFields);
-
-      // Append AI response to chat
-      const aiMessage: ChatMessage = {
+      const aiMsg: ChatMessage = {
         id: `msg-${Date.now() + 1}`,
         sender: 'ai',
-        text: aiData.assistantReply || 'Form fields updated and risk assessment recalculated successfully.',
+        text: aiData.assistant_reply || 'Complaint form updated successfully.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        updatedFields: modifiedFields,
-        actionType: aiData.actionPerformed,
+        updatedFields,
+        actionType: aiData.action_performed,
       };
+      dispatch(addMessage(aiMsg));
 
-      setChatHistory((prev) => [...prev, aiMessage]);
-
-      // Add to audit trail
-      addAuditLog(
-        aiData.actionPerformed || 'AI_FIELD_UPDATE',
-        `AI Co-pilot synced form for ${updatedComplaintObj.complaintNumber}. Updated fields: [${modifiedFields.join(', ')}]. Severity: ${updatedRiskObj.severity}, Risk: ${updatedRiskObj.riskLevel}`,
-        modifiedFields.join(', ')
+      logAudit(
+        aiData.action_performed || 'AI_FIELD_UPDATE',
+        `AI Co-pilot updated form ${updatedComplaint.complaintNumber}. Fields: [${updatedFields.slice(0, 5).join(', ')}]. Severity: ${updatedRisk.severity}, Risk: ${updatedRisk.riskLevel}`,
+        updatedFields.join(', ')
       );
 
-      showToast(`AI Co-pilot updated form fields: [${modifiedFields.slice(0, 3).join(', ')}]`);
+      showToast(`✓ AI updated: [${updatedFields.slice(0, 3).join(', ')}${updatedFields.length > 3 ? '...' : ''}]`);
     } catch (err: any) {
-      console.error('Error in handleSendMessage:', err);
-      const errorMessage: ChatMessage = {
+      console.error('handleSendMessage error:', err);
+      const errMsg: ChatMessage = {
         id: `msg-err-${Date.now()}`,
         sender: 'ai',
-        text: `⚠️ Error processing request: ${err.message || 'Unable to connect to AI server. Please check environment configuration.'}`,
+        text: `⚠️ ${err.message || 'Unable to connect to AI server. Make sure the Python backend is running on port 8000.'}`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
-      setChatHistory((prev) => [...prev, errorMessage]);
+      dispatch(addMessage(errMsg));
+      showToast('AI server error. Check that the backend is running.', 'error');
     } finally {
-      setIsProcessing(false);
+      dispatch(setProcessing(false));
     }
   };
 
-  // Save current complaint into QMS database
-  const handleSaveComplaint = () => {
+  // ── Save to QMS (PostgreSQL via FastAPI) ──────────────────────────────────
+  const handleSaveComplaint = async () => {
     if (!complaint.customerName && !complaint.productName) return;
 
-    const existingIndex = masterComplaints.findIndex(
-      (m) => m.complaint.complaintNumber === complaint.complaintNumber
-    );
+    try {
+      const body = {
+        complaint: {
+          complaint_number: complaint.complaintNumber,
+          status: complaint.status === 'Draft' ? 'Logged' : complaint.status,
+          customer_name: complaint.customerName,
+          customer_type: complaint.customerType,
+          reporter_contact: complaint.reporterContact,
+          product_name: complaint.productName,
+          product_type: complaint.productType,
+          product_strength_grade: complaint.productStrengthGrade,
+          batch_lot_number: complaint.batchLotNumber,
+          mfg_date: complaint.mfgDate,
+          exp_date: complaint.expDate,
+          affected_quantity: complaint.affectedQuantity,
+          complaint_description: complaint.complaintDescription,
+          defect_category: complaint.defectCategory,
+          packaging_condition: complaint.packagingCondition,
+          storage_condition: complaint.storageCondition,
+          adverse_event: complaint.adverseEvent,
+          adverse_event_details: complaint.adverseEventDetails,
+          date_logged: complaint.dateLogged || new Date().toISOString().split('T')[0],
+          last_updated: new Date().toISOString().split('T')[0],
+        },
+        risk: {
+          severity: riskAssessment.severity,
+          risk_level: riskAssessment.riskLevel,
+          suggested_routing: riskAssessment.suggestedRouting,
+          root_cause_hypothesis: riskAssessment.rootCauseHypothesis,
+          rationale: riskAssessment.rationale,
+          capa_required: riskAssessment.capaRequired,
+          recommended_actions: riskAssessment.recommendedActions,
+        },
+        user_name: currentUser ? `${currentUser.name} (${currentUser.roleLabel})` : 'QA Manager',
+      };
 
-    const recordToSave = {
-      complaint: {
-        ...complaint,
-        status: complaint.status === 'Draft' ? 'Logged' : complaint.status,
-      },
-      risk: riskAssessment,
-    };
+      const res = await fetch(`${API_BASE}/complaints`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
 
-    if (existingIndex >= 0) {
-      const updatedList = [...masterComplaints];
-      updatedList[existingIndex] = recordToSave;
-      setMasterComplaints(updatedList);
-      showToast(`Updated record ${complaint.complaintNumber} in QMS database.`);
-      addAuditLog('COMPLAINT_UPDATE', `Updated complaint ${complaint.complaintNumber} in Master Log.`);
-    } else {
-      setMasterComplaints((prev) => [recordToSave, ...prev]);
-      showToast(`Saved new complaint ${complaint.complaintNumber} to QMS database.`);
-      addAuditLog('COMPLAINT_CREATE', `Saved new complaint ${complaint.complaintNumber} for customer ${complaint.customerName}.`);
+      if (res.ok) {
+        const saved = await res.json();
+        // Map API response back to ComplaintData shape
+        const savedComplaint: ComplaintData = {
+          id: saved.complaint.id,
+          complaintNumber: saved.complaint.complaint_number,
+          status: saved.complaint.status as ComplaintData['status'],
+          customerName: saved.complaint.customer_name,
+          customerType: saved.complaint.customer_type,
+          reporterContact: saved.complaint.reporter_contact,
+          productName: saved.complaint.product_name,
+          productType: saved.complaint.product_type as 'API' | 'FDF',
+          productStrengthGrade: saved.complaint.product_strength_grade,
+          batchLotNumber: saved.complaint.batch_lot_number,
+          mfgDate: saved.complaint.mfg_date,
+          expDate: saved.complaint.exp_date,
+          affectedQuantity: saved.complaint.affected_quantity,
+          complaintDescription: saved.complaint.complaint_description,
+          defectCategory: saved.complaint.defect_category,
+          packagingCondition: saved.complaint.packaging_condition,
+          storageCondition: saved.complaint.storage_condition,
+          adverseEvent: saved.complaint.adverse_event,
+          adverseEventDetails: saved.complaint.adverse_event_details,
+          dateLogged: saved.complaint.date_logged,
+          lastUpdated: saved.complaint.last_updated,
+        };
+        const savedRisk: RiskAssessment = {
+          severity: saved.risk?.severity as RiskAssessment['severity'] || '',
+          riskLevel: saved.risk?.risk_level as RiskAssessment['riskLevel'] || '',
+          suggestedRouting: saved.risk?.suggested_routing || '',
+          rootCauseHypothesis: saved.risk?.root_cause_hypothesis || '',
+          rationale: saved.risk?.rationale || '',
+          capaRequired: saved.risk?.capa_required || false,
+          recommendedActions: saved.risk?.recommended_actions || [],
+        };
+        dispatch(addOrUpdateMasterComplaint({ complaint: savedComplaint, risk: savedRisk }));
+        showToast(`✓ Saved ${savedComplaint.complaintNumber} to QMS Master Log (PostgreSQL)`);
+        logAudit('COMPLAINT_SAVED', `Complaint ${savedComplaint.complaintNumber} persisted to Neon PostgreSQL.`);
+      } else {
+        // Fallback: save locally only
+        dispatch(addOrUpdateMasterComplaint({ complaint, risk: riskAssessment }));
+        showToast(`Saved locally — DB not connected. Check DATABASE_URL in .env`, 'error');
+      }
+    } catch {
+      // Fallback: save locally
+      dispatch(addOrUpdateMasterComplaint({ complaint, risk: riskAssessment }));
+      showToast(`Saved locally — DB not reachable.`, 'error');
     }
   };
 
-  // Clear Form
-  const handleClearForm = () => {
-    setComplaint(INITIAL_EMPTY_COMPLAINT);
-    setRiskAssessment(INITIAL_EMPTY_RISK);
-    setRecentlyUpdatedFields([]);
-    addAuditLog('FORM_RESET', 'Cleared customer complaint form fields.');
-    showToast('Complaint form reset.');
+  // ── Load master complaints from DB ────────────────────────────────────────
+  const handleLoadMasterLog = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/complaints`);
+      if (res.ok) {
+        const data = await res.json();
+        const mapped = data.map((record: any) => ({
+          complaint: {
+            id: record.complaint.id,
+            complaintNumber: record.complaint.complaint_number,
+            status: record.complaint.status,
+            customerName: record.complaint.customer_name,
+            customerType: record.complaint.customer_type,
+            reporterContact: record.complaint.reporter_contact,
+            productName: record.complaint.product_name,
+            productType: record.complaint.product_type,
+            productStrengthGrade: record.complaint.product_strength_grade,
+            batchLotNumber: record.complaint.batch_lot_number,
+            mfgDate: record.complaint.mfg_date,
+            expDate: record.complaint.exp_date,
+            affectedQuantity: record.complaint.affected_quantity,
+            complaintDescription: record.complaint.complaint_description,
+            defectCategory: record.complaint.defect_category,
+            packagingCondition: record.complaint.packaging_condition,
+            storageCondition: record.complaint.storage_condition,
+            adverseEvent: record.complaint.adverse_event,
+            adverseEventDetails: record.complaint.adverse_event_details,
+            dateLogged: record.complaint.date_logged,
+            lastUpdated: record.complaint.last_updated,
+          } as ComplaintData,
+          risk: record.risk ? {
+            severity: record.risk.severity,
+            riskLevel: record.risk.risk_level,
+            suggestedRouting: record.risk.suggested_routing,
+            rootCauseHypothesis: record.risk.root_cause_hypothesis,
+            rationale: record.risk.rationale,
+            capaRequired: record.risk.capa_required,
+            recommendedActions: record.risk.recommended_actions || [],
+          } as RiskAssessment : INITIAL_EMPTY_RISK,
+        }));
+        // Merge with existing SAMPLE data
+        dispatch(setMasterComplaints([...mapped, ...SAMPLE_HISTORICAL_COMPLAINTS]));
+      }
+    } catch {
+      // silently keep existing data
+    }
   };
 
-  // Load sample record into form
+  const handleClearForm = () => {
+    dispatch(clearForm());
+    logAudit('FORM_RESET', 'Cleared customer complaint form.');
+    showToast('Form reset.');
+  };
+
   const handleLoadSample = () => {
     const sample = SAMPLE_HISTORICAL_COMPLAINTS[0];
-    setComplaint(sample.complaint);
-    setRiskAssessment(sample.risk);
-    setRecentlyUpdatedFields(['customerName', 'productName', 'batchLotNumber', 'affectedQuantity', 'complaintDescription']);
-    addAuditLog('SAMPLE_LOADED', `Loaded sample complaint ${sample.complaint.complaintNumber} into form.`);
-    showToast(`Loaded sample complaint ${sample.complaint.complaintNumber} into AI Form.`);
+    dispatch(loadComplaintIntoForm(sample));
+    dispatch(setRecentlyUpdatedFields(['customerName', 'productName', 'batchLotNumber', 'affectedQuantity', 'complaintDescription']));
+    logAudit('SAMPLE_LOADED', `Loaded sample ${sample.complaint.complaintNumber} into form.`);
+    showToast(`Loaded sample ${sample.complaint.complaintNumber}`);
   };
 
-  // Select User
   const handleSelectUser = (user: User) => {
     setCurrentUser(user);
-    addAuditLog('USER_SWITCH', `Switched active user session to ${user.name} (${user.roleLabel}).`);
-    showToast(`Switched active profile to ${user.name}`);
+    logAudit('USER_SWITCH', `Switched to ${user.name} (${user.roleLabel}).`);
+    showToast(`Switched to ${user.name}`);
   };
 
-  // Critical risk count
   const criticalRiskCount = masterComplaints.filter(
     (m) => m.risk.severity?.toLowerCase() === 'critical' || m.risk.riskLevel?.toLowerCase() === 'critical'
   ).length;
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
-      {/* Toast Notification Banner */}
+      {/* Toast */}
       {toastMessage && (
-        <div className="fixed top-20 right-6 z-50 bg-white border border-slate-200 text-slate-800 px-4 py-3 rounded-xl shadow-xl flex items-center space-x-3 text-xs animate-in slide-in-from-top-3 duration-200">
-          <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+        <div className={`fixed top-20 right-6 z-50 px-4 py-3 rounded-xl shadow-xl flex items-center space-x-3 text-xs animate-in slide-in-from-top-3 duration-200 border ${
+          toastType === 'error'
+            ? 'bg-rose-50 border-rose-200 text-rose-800'
+            : 'bg-white border-slate-200 text-slate-800'
+        }`}>
+          <CheckCircle2 className={`w-5 h-5 shrink-0 ${toastType === 'error' ? 'text-rose-500' : 'text-emerald-600'}`} />
           <span className="font-semibold">{toastMessage}</span>
         </div>
       )}
 
-      {/* Top Application Navbar */}
+      {/* Navbar */}
       <Navbar
         currentUser={currentUser}
         onSelectUser={handleSelectUser}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={(tab) => {
+          setActiveTab(tab);
+          if (tab === 'master_log') handleLoadMasterLog();
+        }}
         totalComplaintsCount={masterComplaints.length}
         criticalRiskCount={criticalRiskCount}
       />
 
-      {/* Main Workspace Area */}
+      {/* Main Workspace */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Tab 1: AI Co-pilot Split Screen Layout (Left Form + Right Assistant) */}
+        {/* Co-pilot Split Screen */}
         {activeTab === 'copilot' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch min-h-[calc(100vh-140px)]">
-            {/* LEFT SECTION: Log Customer Complaint Form */}
             <div className="lg:col-span-7 flex flex-col">
               <ComplaintForm
                 complaint={complaint}
@@ -267,8 +427,6 @@ export default function App() {
                 onLoadSample={handleLoadSample}
               />
             </div>
-
-            {/* RIGHT SECTION: AI Co-pilot Assistant */}
             <div className="lg:col-span-5 flex flex-col">
               <AiCopilotAssistant
                 chatHistory={chatHistory}
@@ -276,30 +434,29 @@ export default function App() {
                 currentComplaint={complaint}
                 currentRisk={riskAssessment}
                 onSendMessage={handleSendMessage}
-                onClearChat={() => setChatHistory([])}
+                onClearChat={() => dispatch(clearChat())}
               />
             </div>
           </div>
         )}
 
-        {/* Tab 2: Complaints Master Log Table */}
+        {/* Master Log */}
         {activeTab === 'master_log' && (
           <ComplaintsMasterLog
             complaintsList={masterComplaints}
             onLoadComplaintIntoForm={(c, r) => {
-              setComplaint(c);
-              setRiskAssessment(r);
+              dispatch(loadComplaintIntoForm({ complaint: c, risk: r }));
               setActiveTab('copilot');
-              showToast(`Loaded ${c.complaintNumber} into AI Form workspace.`);
+              showToast(`Loaded ${c.complaintNumber} into AI workspace.`);
             }}
           />
         )}
 
-        {/* Tab 3: GMP Audit Trail */}
+        {/* Audit Log */}
         {activeTab === 'audit_log' && <AuditLogView auditLogs={auditLogs} />}
       </main>
 
-      {/* Auth Modal for Login / Demo Users */}
+      {/* Auth Modal */}
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
