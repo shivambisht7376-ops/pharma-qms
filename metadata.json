@@ -1,0 +1,6 @@
+{
+  "name": "Pharma QMS - Customer Complaint Management",
+  "description": "API & FDF Quality Management System featuring AI Co-Pilot for natural language complaint logging, document extraction, and GMP risk assessment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
