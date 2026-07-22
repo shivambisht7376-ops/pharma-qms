@@ -73,3 +73,28 @@ async def health_check():
         },
         "database": "Neon PostgreSQL",
     }
+
+
+# ── Serve React Frontend (Production) ──
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+client_build_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dist", "client")
+
+# Only mount static files if the build directory exists (i.e. in production)
+if os.path.exists(client_build_dir):
+    # Mount the /assets folder created by Vite
+    assets_dir = os.path.join(client_build_dir, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    # Catch-all route to serve index.html for React Router (and other static files at root)
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        # If they request a specific file like favicon.ico
+        specific_file = os.path.join(client_build_dir, full_path)
+        if os.path.exists(specific_file) and os.path.isfile(specific_file):
+            return FileResponse(specific_file)
+        # Otherwise serve index.html for client-side routing
+        return FileResponse(os.path.join(client_build_dir, "index.html"))
+
