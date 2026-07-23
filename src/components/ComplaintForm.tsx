@@ -18,13 +18,16 @@ import {
   Sparkles,
   Info,
   Pill,
-  Check
+  Check,
+  RefreshCw,
+  Database
 } from 'lucide-react';
 
 interface ComplaintFormProps {
   complaint: ComplaintData;
   riskAssessment: RiskAssessment;
   recentlyUpdatedFields: string[];
+  isSavedInDb: boolean;
   onSaveComplaint: () => void;
   onClearForm: () => void;
   onLoadSample: () => void;
@@ -34,6 +37,7 @@ export const ComplaintForm: React.FC<ComplaintFormProps> = ({
   complaint,
   riskAssessment,
   recentlyUpdatedFields,
+  isSavedInDb,
   onSaveComplaint,
   onClearForm,
   onLoadSample,
@@ -89,7 +93,7 @@ export const ComplaintForm: React.FC<ComplaintFormProps> = ({
               <FileCheck className="w-6 h-6" />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                 <h1 className="text-xl sm:text-2xl font-bold text-slate-800 tracking-tight">
                   Customer Complaint Log
                 </h1>
@@ -102,6 +106,18 @@ export const ComplaintForm: React.FC<ComplaintFormProps> = ({
                     Status: AI Synchronized
                   </span>
                 )}
+                {/* Saved-in-DB badge */}
+                {isSavedInDb ? (
+                  <span className="flex items-center space-x-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    <Database className="w-3 h-3" />
+                    <span>Saved in DB</span>
+                  </span>
+                ) : hasData ? (
+                  <span className="flex items-center space-x-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                    <Clock className="w-3 h-3" />
+                    <span>Unsaved</span>
+                  </span>
+                ) : null}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 Pharmaceutical QMS • Real-Time AI Synchronization
@@ -441,10 +457,17 @@ export const ComplaintForm: React.FC<ComplaintFormProps> = ({
           id="save-complaint-to-qms-button"
           onClick={onSaveComplaint}
           disabled={!hasData}
-          className="text-xs px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-bold shadow-sm flex items-center space-x-2 transition-all"
+          className={`text-xs px-5 py-2.5 rounded-xl disabled:opacity-40 text-white font-bold shadow-sm flex items-center space-x-2 transition-all ${
+            isSavedInDb
+              ? 'bg-emerald-600 hover:bg-emerald-700'
+              : 'bg-blue-600 hover:bg-blue-700'
+          }`}
         >
-          <Save className="w-4 h-4" />
-          <span>Save Record to QMS Master Log</span>
+          {isSavedInDb ? (
+            <><RefreshCw className="w-4 h-4" /><span>Update Record in DB</span></>
+          ) : (
+            <><Save className="w-4 h-4" /><span>Save Record to QMS Master Log</span></>
+          )}
         </button>
       </div>
     </div>

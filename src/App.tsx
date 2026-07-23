@@ -329,9 +329,16 @@ export default function App() {
           capaRequired: saved.risk?.capa_required || false,
           recommendedActions: saved.risk?.recommended_actions || [],
         };
+        // Sync active form with the real DB record so next save hits UPDATE path
+        dispatch(setComplaint(savedComplaint));
+        dispatch(setRiskAssessment(savedRisk));
         dispatch(addOrUpdateMasterComplaint({ complaint: savedComplaint, risk: savedRisk }));
-        showToast(`✓ Saved ${savedComplaint.complaintNumber} to QMS Master Log (PostgreSQL)`);
-        logAudit('COMPLAINT_SAVED', `Complaint ${savedComplaint.complaintNumber} persisted to Neon PostgreSQL.`);
+        const wasUpdate = Boolean(complaint.id && !complaint.id.startsWith('cmp-'));
+        showToast(`✓ ${wasUpdate ? 'Updated' : 'Saved'} ${savedComplaint.complaintNumber} in QMS Master Log (PostgreSQL)`);
+        logAudit(
+          wasUpdate ? 'COMPLAINT_UPDATED' : 'COMPLAINT_SAVED',
+          `Complaint ${savedComplaint.complaintNumber} ${wasUpdate ? 'updated' : 'persisted'} to Neon PostgreSQL.`
+        );
       } else {
         // Fallback: save locally only
         const errorData = await res.json().catch(() => ({}));
@@ -468,6 +475,7 @@ export default function App() {
                 complaint={complaint}
                 riskAssessment={riskAssessment}
                 recentlyUpdatedFields={recentlyUpdatedFields}
+                isSavedInDb={Boolean(complaint.id && !complaint.id.startsWith('cmp-'))}
                 onSaveComplaint={handleSaveComplaint}
                 onClearForm={handleClearForm}
                 onLoadSample={handleLoadSample}
