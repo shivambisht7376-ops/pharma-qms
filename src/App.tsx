@@ -334,8 +334,10 @@ export default function App() {
         logAudit('COMPLAINT_SAVED', `Complaint ${savedComplaint.complaintNumber} persisted to Neon PostgreSQL.`);
       } else {
         // Fallback: save locally only
+        const errorData = await res.json().catch(() => ({}));
+        const errorMessage = errorData.detail || 'DB not connected or validation failed.';
         dispatch(addOrUpdateMasterComplaint({ complaint, risk: riskAssessment }));
-        showToast(`Saved locally — DB not connected. Check DATABASE_URL in .env`, 'error');
+        showToast(`Save failed: ${errorMessage}`, 'error');
       }
     } catch {
       // Fallback: save locally
