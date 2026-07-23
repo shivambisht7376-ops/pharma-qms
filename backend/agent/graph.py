@@ -165,22 +165,35 @@ def router_node(state: AgentState) -> AgentState:
                 intent = candidate
                 break
 
-        # Override: if there's an existing complaint and user says "change/update/modify"
-        msg_lower = state["user_message"].lower()
+        # ── Meaningful-complaint check ────────────────────────────────────────
+        # Only treat complaint as "existing" when real identifying fields are filled.
+        # Default values like product_type="FDF" do NOT count as an existing complaint.
         current_cmp = state.get("current_complaint") or {}
-        # has_complaint: any non-empty string value in the current complaint
-        has_complaint = any(
-            v not in (None, "", False, [])
-            for v in current_cmp.values()
+        has_meaningful_complaint = bool(
+            current_cmp.get("customer_name") or
+            current_cmp.get("product_name") or
+            current_cmp.get("batch_lot_number") or
+            current_cmp.get("complaint_description")
         )
-        if has_complaint and any(w in msg_lower for w in ["change", "update", "modify", "correct", "edit", "set", "make it", "actually", "fix", "adjust"]):
-            intent = "EDIT_FIELDS"
 
-        logger.info(f"[ROUTER] Intent: {intent} | has_complaint={has_complaint}")
+        # ── Safety rules ──────────────────────────────────────────────────────
+        msg_lower = state["user_message"].lower()
+        edit_keywords = ["change", "update", "modify", "correct", "edit",
+                         "set", "make it", "actually", "fix", "adjust"]
+
+        if has_meaningful_complaint and any(w in msg_lower for w in edit_keywords):
+            # User clearly wants to edit an existing complaint
+            intent = "EDIT_FIELDS"
+        elif not has_meaningful_complaint and intent == "EDIT_FIELDS":
+            # LLM wrongly said EDIT but there's no real complaint yet → force LOG_NEW
+            intent = "LOG_NEW"
+
+        logger.info(f"[ROUTER] Intent: {intent} | has_meaningful={has_meaningful_complaint}")
         return {**state, "intent": intent}
     except Exception as e:
         logger.error(f"[ROUTER ERROR] {e}")
         return {**state, "intent": "LOG_NEW", "error": str(e)}
+
 
 
 def log_complaint_node(state: AgentState) -> AgentState:
