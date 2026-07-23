@@ -9,6 +9,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
+from sqlalchemy.orm import selectinload
 from backend.database import get_db
 from backend.models import Complaint, RiskAssessment, AuditLog
 from backend.schemas import SaveComplaintRequest, ComplaintRecord, ComplaintResponse, RiskAssessmentResponse
@@ -69,7 +70,9 @@ async def list_complaints(db: AsyncSession = Depends(get_db)):
     """List all complaints with their risk assessments."""
     try:
         result = await db.execute(
-            select(Complaint).order_by(desc(Complaint.created_at))
+            select(Complaint)
+            .options(selectinload(Complaint.risk_assessment))
+            .order_by(desc(Complaint.created_at))
         )
         complaints = result.scalars().all()
 
@@ -99,9 +102,11 @@ async def save_complaint(body: SaveComplaintRequest, db: AsyncSession = Depends(
         # Generate complaint number if missing
         complaint_number = c_data.complaint_number or f"CMP-{datetime.utcnow().year}-{str(uuid.uuid4())[:4].upper()}"
 
-        # Check if complaint already exists
+        # Check if complaint already exists (eagerly load risk_assessment to avoid async lazy-load)
         existing_result = await db.execute(
-            select(Complaint).where(Complaint.complaint_number == complaint_number)
+            select(Complaint)
+            .options(selectinload(Complaint.risk_assessment))
+            .where(Complaint.complaint_number == complaint_number)
         )
         existing = existing_result.scalar_one_or_none()
 
