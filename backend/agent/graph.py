@@ -477,11 +477,34 @@ async def run_complaint_agent(
     file_content = None
     if file_base64:
         try:
-            decoded = base64.b64decode(file_base64).decode("utf-8", errors="replace")
-            file_content = decoded
+            raw_bytes = base64.b64decode(file_base64)
+
+            # Check if it's a PDF by magic bytes
+            if raw_bytes[:4] == b'%PDF' or (file_mime_type and 'pdf' in file_mime_type.lower()):
+                # Use PyPDF2 to extract text from PDF
+                try:
+                    import io
+                    import PyPDF2
+                    pdf_reader = PyPDF2.PdfReader(io.BytesIO(raw_bytes))
+                    pages_text = []
+                    for page in pdf_reader.pages:
+                        text = page.extract_text()
+                        if text:
+                            pages_text.append(text.strip())
+                    file_content = "\n\n".join(pages_text)
+                    logger.info(f"[PDF] Extracted {len(pdf_reader.pages)} pages, {len(file_content)} chars")
+                    if not file_content.strip():
+                        file_content = f"[PDF uploaded: {file_name or 'document.pdf'} — no extractable text found. It may be a scanned image PDF.]"
+                except Exception as pdf_err:
+                    logger.warning(f"PyPDF2 extraction failed: {pdf_err}")
+                    file_content = raw_bytes.decode("utf-8", errors="replace")
+            else:
+                # Plain text / other formats — decode normally
+                file_content = raw_bytes.decode("utf-8", errors="replace")
+
         except Exception as e:
             logger.warning(f"Could not decode file: {e}")
-            file_content = file_base64
+            file_content = str(file_base64)[:2000]
 
     initial_state: AgentState = {
         "user_message": user_message or "Process the uploaded document",

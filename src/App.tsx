@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState, AppDispatch } from './store';
 import { User, ComplaintData, RiskAssessment, ChatMessage } from './types';
@@ -386,13 +386,21 @@ export default function App() {
             recommendedActions: record.risk.recommended_actions || [],
           } as RiskAssessment : INITIAL_EMPTY_RISK,
         }));
-        // Merge with existing SAMPLE data
-        dispatch(setMasterComplaints([...mapped, ...SAMPLE_HISTORICAL_COMPLAINTS]));
+        // If DB has real data use it, otherwise fall back to sample data
+        if (mapped.length > 0) {
+          dispatch(setMasterComplaints(mapped));
+        } else {
+          dispatch(setMasterComplaints(SAMPLE_HISTORICAL_COMPLAINTS));
+        }
       }
     } catch {
       // silently keep existing data
     }
   };
+
+  // ── Auto-load DB complaints on every page startup ─────────────────────────
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { handleLoadMasterLog(); }, []);
 
   const handleClearForm = () => {
     dispatch(clearForm());
