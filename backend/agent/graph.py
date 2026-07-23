@@ -67,7 +67,7 @@ def get_smart_llm(json_mode: bool = False):
     """llama-3.3-70b-versatile — deeper reasoning for risk + replies."""
     kwargs: dict = dict(
         api_key=settings.groq_api_key,
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         temperature=0.1,
         max_tokens=2048,
     )
@@ -382,8 +382,12 @@ CRITICAL: Respond with ONLY a valid JSON object. No markdown fences, no explanat
 
 
 def reply_node(state: AgentState) -> AgentState:
-    """Generates a conversational assistant reply."""
+    """Generates a contextual reply confirming what was done."""
     try:
+        # If any previous step failed with a hard error, surface it instead of pretending success
+        if state.get("error"):
+            return {**state, "assistant_reply": f"❌ Action failed due to an error: {state['error']}"}
+
         complaint = state.get("extracted_complaint") or {}
         risk = state.get("risk_assessment") or {}
         action = state.get("action_performed", "GENERAL_QUERY")
@@ -426,7 +430,11 @@ def reply_node(state: AgentState) -> AgentState:
         return {**state, "assistant_reply": reply}
     except Exception as e:
         logger.error(f"[REPLY ERROR] {e}")
-        return {**state, "assistant_reply": f"Complaint processed successfully. Action: {state.get('action_performed', 'complete')}."}
+        if state.get("error"):
+            reply = f"I encountered an error: {state['error']}"
+        else:
+            reply = f"Complaint processed successfully. Action: {state.get('action_performed', 'complete')}."
+        return {**state, "assistant_reply": reply}
 
 
 # ── Routing Logic ─────────────────────────────────────────────────────────────
