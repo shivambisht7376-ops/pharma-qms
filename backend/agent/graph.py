@@ -167,11 +167,16 @@ def router_node(state: AgentState) -> AgentState:
 
         # Override: if there's an existing complaint and user says "change/update/modify"
         msg_lower = state["user_message"].lower()
-        has_complaint = bool(state.get("current_complaint") and state["current_complaint"].get("customer_name"))
-        if has_complaint and any(w in msg_lower for w in ["change", "update", "modify", "correct", "edit", "set", "make it", "actually"]):
+        current_cmp = state.get("current_complaint") or {}
+        # has_complaint: any non-empty string value in the current complaint
+        has_complaint = any(
+            v not in (None, "", False, [])
+            for v in current_cmp.values()
+        )
+        if has_complaint and any(w in msg_lower for w in ["change", "update", "modify", "correct", "edit", "set", "make it", "actually", "fix", "adjust"]):
             intent = "EDIT_FIELDS"
 
-        logger.info(f"[ROUTER] Intent: {intent}")
+        logger.info(f"[ROUTER] Intent: {intent} | has_complaint={has_complaint}")
         return {**state, "intent": intent}
     except Exception as e:
         logger.error(f"[ROUTER ERROR] {e}")
@@ -323,8 +328,12 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     try:
         complaint_data = state.get("extracted_complaint") or state.get("current_complaint") or {}
 
-        # Skip if no meaningful complaint data
-        if not (complaint_data.get("complaint_description") or complaint_data.get("product_name") or complaint_data.get("batch_lot_number")):
+        # Skip if no meaningful complaint data at all
+        any_data = any(
+            v not in (None, "", False, [])
+            for v in complaint_data.values()
+        )
+        if not any_data:
             return {**state, "risk_assessment": state.get("current_risk") or {}}
 
         prompt = RISK_ASSESSMENT_PROMPT.format(

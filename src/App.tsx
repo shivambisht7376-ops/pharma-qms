@@ -444,6 +444,10 @@ export default function App() {
         }}
         totalComplaintsCount={masterComplaints.length}
         criticalRiskCount={criticalRiskCount}
+        onViewComplaints={() => {
+          setActiveTab('master_log');
+          handleLoadMasterLog();
+        }}
       />
 
       {/* Main Workspace */}

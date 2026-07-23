@@ -11,6 +11,7 @@ interface NavbarProps {
   setActiveTab: (tab: 'copilot' | 'master_log' | 'audit_log') => void;
   totalComplaintsCount: number;
   criticalRiskCount: number;
+  onViewComplaints: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -21,6 +22,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   setActiveTab,
   totalComplaintsCount,
   criticalRiskCount,
+  onViewComplaints,
 }) => {
   const [showUserDropdown, setShowUserDropdown] = useState(false);
 
@@ -48,18 +50,28 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Quick Metrics Badges */}
+          {/* Quick Metrics Badges — clickable to navigate to master log */}
           <div className="hidden lg:flex items-center space-x-4 text-xs">
-            <div className="flex items-center space-x-2 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
+            <button
+              id="nav-metric-total-complaints"
+              onClick={onViewComplaints}
+              title="View all complaints"
+              className="flex items-center space-x-2 bg-slate-50 hover:bg-blue-50 px-3 py-1.5 rounded-lg border border-slate-200 hover:border-blue-300 cursor-pointer transition-all group"
+            >
               <Layers className="w-3.5 h-3.5 text-blue-600" />
-              <span className="text-slate-500">Total Complaints:</span>
-              <span className="font-bold text-slate-800">{totalComplaintsCount}</span>
-            </div>
-            <div className="flex items-center space-x-2 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
+              <span className="text-slate-500 group-hover:text-blue-600">Total Complaints:</span>
+              <span className="font-bold text-slate-800 group-hover:text-blue-700">{totalComplaintsCount}</span>
+            </button>
+            <button
+              id="nav-metric-critical-risks"
+              onClick={onViewComplaints}
+              title="View critical complaints"
+              className="flex items-center space-x-2 bg-slate-50 hover:bg-rose-50 px-3 py-1.5 rounded-lg border border-slate-200 hover:border-rose-300 cursor-pointer transition-all group"
+            >
               <ShieldAlert className="w-3.5 h-3.5 text-rose-600" />
-              <span className="text-slate-500">Critical Risks:</span>
+              <span className="text-slate-500 group-hover:text-rose-600">Critical Risks:</span>
               <span className="font-bold text-rose-600">{criticalRiskCount}</span>
-            </div>
+            </button>
           </div>
 
           {/* Main Navigation Tabs */}
