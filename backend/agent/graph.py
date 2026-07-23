@@ -51,10 +51,10 @@ EMPTY_COMPLAINT = {
 # ── Groq LLM Clients ──────────────────────────────────────────────────────────
 
 def get_fast_llm(json_mode: bool = False):
-    """gemma2-9b-it — fast extraction and routing."""
+    """llama-3.1-8b-instant — fast extraction and routing."""
     kwargs: dict = dict(
         api_key=settings.groq_api_key,
-        model="gemma2-9b-it",
+        model="llama-3.1-8b-instant",
         temperature=0.0,
         max_tokens=2048,
     )
@@ -293,7 +293,7 @@ def extract_document_node(state: AgentState) -> AgentState:
     """Extracts complaint data from uploaded document text."""
     try:
         document_text = state.get("file_content") or state.get("user_message") or ""
-        prompt = EXTRACT_DOCUMENT_PROMPT.format(document_text=document_text) + """
+        prompt = EXTRACT_DOCUMENT_PROMPT.replace("{document_text}", document_text) + """
 
 CRITICAL: Respond with ONLY a JSON object. No markdown. Start with { and end with }.
 """
@@ -336,8 +336,8 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         if not any_data:
             return {**state, "risk_assessment": state.get("current_risk") or {}}
 
-        prompt = RISK_ASSESSMENT_PROMPT.format(
-            complaint_data=json.dumps(complaint_data, indent=2)
+        prompt = RISK_ASSESSMENT_PROMPT.replace(
+            "{complaint_data}", json.dumps(complaint_data, indent=2)
         ) + """
 
 CRITICAL: Respond with ONLY a valid JSON object. No markdown fences, no explanation.
