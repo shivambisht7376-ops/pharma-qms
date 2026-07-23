@@ -3,15 +3,15 @@ LangGraph-powered complaint processing agent using Groq LLMs.
 Compatible with langgraph>=1.0 and langchain-core>=1.0
 
 Models:
-  - gemma2-9b-it              → intent routing + field extraction
+  - gemma2-9b-it              → intent routing + field extraction  
   - llama-3.3-70b-versatile   → risk assessment + assistant reply
 """
 from __future__ import annotations
 import json
+import re
 import base64
 import logging
-from typing import TypedDict, Optional, List, Annotated
-import operator
+from typing import TypedDict, Optional, List
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -28,44 +28,113 @@ from backend.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# ── Empty complaint template ──────────────────────────────────────────────────
+EMPTY_COMPLAINT = {
+    "customer_name": "",
+    "customer_type": "",
+    "reporter_contact": "",
+    "product_name": "",
+    "product_type": "FDF",
+    "product_strength_grade": "",
+    "batch_lot_number": "",
+    "mfg_date": "",
+    "exp_date": "",
+    "affected_quantity": "",
+    "complaint_description": "",
+    "defect_category": "",
+    "packaging_condition": "",
+    "storage_condition": "",
+    "adverse_event": False,
+    "adverse_event_details": "",
+}
 
-# ─── Groq LLM Clients ─────────────────────────────────────────────────────────
+# ── Groq LLM Clients ──────────────────────────────────────────────────────────
 
-def get_fast_llm():
+def get_fast_llm(json_mode: bool = False):
     """gemma2-9b-it — fast extraction and routing."""
-    return ChatGroq(
+    kwargs: dict = dict(
         api_key=settings.groq_api_key,
         model="gemma2-9b-it",
-        temperature=0.1,
-        max_tokens=4096,
+        temperature=0.0,
+        max_tokens=2048,
     )
+    if json_mode:
+        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+    return ChatGroq(**kwargs)
 
 
-def get_smart_llm():
+def get_smart_llm(json_mode: bool = False):
     """llama-3.3-70b-versatile — deeper reasoning for risk + replies."""
-    return ChatGroq(
+    kwargs: dict = dict(
         api_key=settings.groq_api_key,
         model="llama-3.3-70b-versatile",
-        temperature=0.2,
-        max_tokens=4096,
+        temperature=0.1,
+        max_tokens=2048,
     )
+    if json_mode:
+        kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+    return ChatGroq(**kwargs)
 
 
-# ─── Agent State ──────────────────────────────────────────────────────────────
+# ── Robust JSON extractor ─────────────────────────────────────────────────────
+
+def _extract_json(text: str) -> dict:
+    """
+    Multi-strategy JSON extractor — handles:
+    1. Pure JSON response
+    2. JSON inside markdown code fences (```json ... ```)
+    3. JSON embedded inside prose text
+    4. Partial/malformed JSON (best effort)
+    """
+    text = text.strip()
+
+    # Strategy 1: try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: strip markdown fences
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: find largest JSON object in the text
+    brace_pattern = re.findall(r"\{[\s\S]*?\}", text)
+    if brace_pattern:
+        # Try from largest to smallest match
+        for candidate in sorted(brace_pattern, key=len, reverse=True):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+    # Strategy 4: extract JSON from first { to last }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    logger.error(f"[JSON EXTRACT FAILED] Raw LLM output: {text[:500]}")
+    return {}
+
+
+# ── Agent State ───────────────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
-    # Inputs
     user_message: str
     current_complaint: Optional[dict]
     current_risk: Optional[dict]
     file_content: Optional[str]
     file_name: Optional[str]
     user_role: str
-
-    # Intermediate
     intent: str
-
-    # Outputs
     extracted_complaint: Optional[dict]
     updated_fields: List[str]
     risk_assessment: Optional[dict]
@@ -74,18 +143,7 @@ class AgentState(TypedDict):
     error: Optional[str]
 
 
-def _strip_json_fences(text: str) -> str:
-    """Remove markdown code fences from LLM output."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # Remove first line (```json or ```) and last line (```)
-        inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
-        text = "\n".join(inner).strip()
-    return text
-
-
-# ─── Nodes ────────────────────────────────────────────────────────────────────
+# ── Nodes ─────────────────────────────────────────────────────────────────────
 
 def router_node(state: AgentState) -> AgentState:
     """Determines intent: LOG_NEW | EDIT_FIELDS | EXTRACT_DOCUMENT | GENERAL_QUERY"""
@@ -93,106 +151,195 @@ def router_node(state: AgentState) -> AgentState:
         if state.get("file_content"):
             return {**state, "intent": "EXTRACT_DOCUMENT"}
 
-        llm = get_fast_llm()
+        llm = get_fast_llm(json_mode=False)  # Router returns plain text, not JSON
         response = llm.invoke([
             SystemMessage(content=ROUTER_PROMPT),
             HumanMessage(content=state["user_message"]),
         ])
-        intent = response.content.strip().upper()
-        valid = {"LOG_NEW", "EDIT_FIELDS", "EXTRACT_DOCUMENT", "GENERAL_QUERY"}
-        if intent not in valid:
-            for v in valid:
-                if v in intent:
-                    intent = v
-                    break
-            else:
-                intent = "EDIT_FIELDS" if state.get("current_complaint") else "LOG_NEW"
+        raw = response.content.strip().upper()
+
+        # Parse intent from response
+        intent = "LOG_NEW"
+        for candidate in ["LOG_NEW", "EDIT_FIELDS", "EXTRACT_DOCUMENT", "GENERAL_QUERY"]:
+            if candidate in raw:
+                intent = candidate
+                break
+
+        # Override: if there's an existing complaint and user says "change/update/modify"
+        msg_lower = state["user_message"].lower()
+        has_complaint = bool(state.get("current_complaint") and state["current_complaint"].get("customer_name"))
+        if has_complaint and any(w in msg_lower for w in ["change", "update", "modify", "correct", "edit", "set", "make it", "actually"]):
+            intent = "EDIT_FIELDS"
+
+        logger.info(f"[ROUTER] Intent: {intent}")
         return {**state, "intent": intent}
     except Exception as e:
-        logger.error(f"router_node error: {e}")
+        logger.error(f"[ROUTER ERROR] {e}")
         return {**state, "intent": "LOG_NEW", "error": str(e)}
 
 
 def log_complaint_node(state: AgentState) -> AgentState:
-    """Extracts complaint fields from natural language."""
+    """Extracts complaint fields from natural language — uses JSON mode for reliability."""
     try:
-        llm = get_fast_llm()
+        # Use llama-3.3-70b for better extraction reliability in JSON mode
+        llm = get_smart_llm(json_mode=True)
+
+        system_prompt = LOG_COMPLAINT_PROMPT + """
+
+CRITICAL: You MUST respond with ONLY a JSON object. No introduction, no explanation, no markdown.
+Start your response with { and end with }
+Extract every detail you can find in the user message.
+"""
         response = llm.invoke([
-            SystemMessage(content=LOG_COMPLAINT_PROMPT),
-            HumanMessage(content=f"Extract complaint details:\n\n{state['user_message']}"),
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=state["user_message"]),
         ])
-        text = _strip_json_fences(response.content)
-        extracted = json.loads(text)
-        all_fields = [k for k, v in extracted.items() if v not in ("", None, False)]
-        return {**state, "extracted_complaint": extracted, "updated_fields": all_fields, "action_performed": "LOG_NEW"}
+
+        logger.info(f"[LOG_COMPLAINT] Raw LLM: {response.content[:300]}")
+        extracted = _extract_json(response.content)
+
+        if not extracted:
+            # Fallback: try with gemma
+            llm2 = get_fast_llm(json_mode=False)
+            response2 = llm2.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=state["user_message"]),
+            ])
+            extracted = _extract_json(response2.content)
+
+        # Merge with empty template so all keys are present
+        merged = {**EMPTY_COMPLAINT, **extracted}
+
+        # Determine which fields were actually filled
+        updated_fields = [
+            k for k, v in merged.items()
+            if v not in ("", None, False, []) and EMPTY_COMPLAINT.get(k) != v
+        ]
+
+        logger.info(f"[LOG_COMPLAINT] Extracted {len(updated_fields)} fields: {updated_fields}")
+        return {
+            **state,
+            "extracted_complaint": merged,
+            "updated_fields": updated_fields,
+            "action_performed": "LOG_NEW",
+        }
     except Exception as e:
-        logger.error(f"log_complaint_node error: {e}")
-        return {**state, "extracted_complaint": {}, "updated_fields": [], "action_performed": "LOG_NEW", "error": str(e)}
+        logger.error(f"[LOG_COMPLAINT ERROR] {e}", exc_info=True)
+        return {**state, "extracted_complaint": EMPTY_COMPLAINT, "updated_fields": [], "action_performed": "LOG_NEW", "error": str(e)}
 
 
 def edit_complaint_node(state: AgentState) -> AgentState:
     """Updates only the fields specified by the user, preserving all others."""
     try:
         current = state.get("current_complaint") or {}
-        prompt = EDIT_COMPLAINT_PROMPT.format(current_complaint=json.dumps(current, indent=2))
-        llm = get_fast_llm()
+        current_merged = {**EMPTY_COMPLAINT, **current}
+
+        prompt = EDIT_COMPLAINT_PROMPT.format(
+            current_complaint=json.dumps(current_merged, indent=2)
+        ) + """
+
+CRITICAL: You MUST respond with ONLY a JSON object. No markdown, no explanation.
+Format EXACTLY:
+{
+  "updated_complaint": { ...complete complaint with all fields... },
+  "updated_fields": ["field_name_1", "field_name_2"]
+}
+"""
+        llm = get_smart_llm(json_mode=True)
         response = llm.invoke([
             SystemMessage(content=prompt),
-            HumanMessage(content=f"User edit: {state['user_message']}"),
+            HumanMessage(content=f"User edit request: {state['user_message']}"),
         ])
-        text = _strip_json_fences(response.content)
-        result = json.loads(text)
-        updated_complaint = result.get("updated_complaint", current)
-        updated_fields = result.get("updated_fields", [])
-        return {**state, "extracted_complaint": updated_complaint, "updated_fields": updated_fields, "action_performed": "EDIT_FIELDS"}
+
+        logger.info(f"[EDIT_COMPLAINT] Raw LLM: {response.content[:300]}")
+        result = _extract_json(response.content)
+
+        updated_complaint = result.get("updated_complaint") or current_merged
+        updated_fields = result.get("updated_fields") or []
+
+        return {
+            **state,
+            "extracted_complaint": {**EMPTY_COMPLAINT, **updated_complaint},
+            "updated_fields": updated_fields,
+            "action_performed": "EDIT_FIELDS",
+        }
     except Exception as e:
-        logger.error(f"edit_complaint_node error: {e}")
-        return {**state, "extracted_complaint": state.get("current_complaint") or {}, "updated_fields": [], "action_performed": "EDIT_FIELDS", "error": str(e)}
+        logger.error(f"[EDIT_COMPLAINT ERROR] {e}", exc_info=True)
+        return {**state, "extracted_complaint": state.get("current_complaint") or EMPTY_COMPLAINT, "updated_fields": [], "action_performed": "EDIT_FIELDS", "error": str(e)}
 
 
 def extract_document_node(state: AgentState) -> AgentState:
     """Extracts complaint data from uploaded document text."""
     try:
         document_text = state.get("file_content") or state.get("user_message") or ""
-        file_name = state.get("file_name") or "document"
-        prompt = EXTRACT_DOCUMENT_PROMPT.format(document_text=document_text)
-        llm = get_smart_llm()
+        prompt = EXTRACT_DOCUMENT_PROMPT.format(document_text=document_text) + """
+
+CRITICAL: Respond with ONLY a JSON object. No markdown. Start with { and end with }.
+"""
+        llm = get_smart_llm(json_mode=True)
         response = llm.invoke([
             SystemMessage(content=prompt),
-            HumanMessage(content=f"Extract all complaint details from: {file_name}"),
+            HumanMessage(content="Extract all complaint details from this document."),
         ])
-        text = _strip_json_fences(response.content)
-        extracted = json.loads(text)
-        all_fields = [k for k, v in extracted.items() if v not in ("", None, False)]
-        return {**state, "extracted_complaint": extracted, "updated_fields": all_fields, "action_performed": "EXTRACT_DOCUMENT"}
+
+        extracted = _extract_json(response.content)
+        merged = {**EMPTY_COMPLAINT, **extracted}
+        updated_fields = [k for k, v in merged.items() if v not in ("", None, False) and EMPTY_COMPLAINT.get(k) != v]
+
+        return {**state, "extracted_complaint": merged, "updated_fields": updated_fields, "action_performed": "EXTRACT_DOCUMENT"}
     except Exception as e:
-        logger.error(f"extract_document_node error: {e}")
-        return {**state, "extracted_complaint": {}, "updated_fields": [], "action_performed": "EXTRACT_DOCUMENT", "error": str(e)}
+        logger.error(f"[EXTRACT_DOCUMENT ERROR] {e}", exc_info=True)
+        return {**state, "extracted_complaint": EMPTY_COMPLAINT, "updated_fields": [], "action_performed": "EXTRACT_DOCUMENT", "error": str(e)}
 
 
 def general_query_node(state: AgentState) -> AgentState:
     """Handles general questions without modifying the complaint."""
-    return {**state, "extracted_complaint": state.get("current_complaint") or {}, "updated_fields": [], "action_performed": "GENERAL_QUERY"}
+    return {
+        **state,
+        "extracted_complaint": state.get("current_complaint") or EMPTY_COMPLAINT,
+        "updated_fields": [],
+        "action_performed": "GENERAL_QUERY",
+    }
 
 
 def risk_assessment_node(state: AgentState) -> AgentState:
     """Generates ICH Q9 pharmaceutical risk assessment."""
     try:
         complaint_data = state.get("extracted_complaint") or state.get("current_complaint") or {}
-        if not (complaint_data.get("complaint_description") or complaint_data.get("product_name")):
+
+        # Skip if no meaningful complaint data
+        if not (complaint_data.get("complaint_description") or complaint_data.get("product_name") or complaint_data.get("batch_lot_number")):
             return {**state, "risk_assessment": state.get("current_risk") or {}}
 
-        prompt = RISK_ASSESSMENT_PROMPT.format(complaint_data=json.dumps(complaint_data, indent=2))
-        llm = get_smart_llm()
+        prompt = RISK_ASSESSMENT_PROMPT.format(
+            complaint_data=json.dumps(complaint_data, indent=2)
+        ) + """
+
+CRITICAL: Respond with ONLY a valid JSON object. No markdown fences, no explanation.
+"""
+        llm = get_smart_llm(json_mode=True)
         response = llm.invoke([
             SystemMessage(content=prompt),
-            HumanMessage(content="Generate the pharmaceutical risk assessment."),
+            HumanMessage(content="Generate the pharmaceutical risk assessment now."),
         ])
-        text = _strip_json_fences(response.content)
-        risk = json.loads(text)
+
+        logger.info(f"[RISK] Raw LLM: {response.content[:200]}")
+        risk = _extract_json(response.content)
+
+        if not risk:
+            risk = {
+                "severity": "Major",
+                "risk_level": "High",
+                "suggested_routing": "QA Investigation",
+                "root_cause_hypothesis": "Further investigation required.",
+                "rationale": "Packaging/product defect reported.",
+                "capa_required": True,
+                "recommended_actions": ["Initiate QA investigation", "Request batch samples", "Notify QP"],
+            }
+
         return {**state, "risk_assessment": risk}
     except Exception as e:
-        logger.error(f"risk_assessment_node error: {e}")
+        logger.error(f"[RISK ERROR] {e}", exc_info=True)
         return {**state, "risk_assessment": state.get("current_risk") or {}, "error": str(e)}
 
 
@@ -205,18 +352,25 @@ def reply_node(state: AgentState) -> AgentState:
         updated = state.get("updated_fields", [])
 
         if action == "GENERAL_QUERY":
-            return {**state, "assistant_reply": "I'm your Pharma QMS Co-pilot. Describe a complaint in plain language to log it, or ask me to update specific fields."}
+            llm = get_smart_llm(json_mode=False)
+            response = llm.invoke([
+                SystemMessage(content="You are a helpful Pharma QMS AI co-pilot. Answer pharmaceutical QMS questions concisely and professionally."),
+                HumanMessage(content=state["user_message"]),
+            ])
+            return {**state, "assistant_reply": response.content.strip()}
 
         complaint_summary = (
-            f"Product: {complaint.get('product_name', 'N/A')}, "
+            f"Customer: {complaint.get('customer_name', 'N/A')}, "
+            f"Product: {complaint.get('product_name', 'N/A')} {complaint.get('product_strength_grade', '')}, "
             f"Batch: {complaint.get('batch_lot_number', 'N/A')}, "
-            f"Customer: {complaint.get('customer_name', 'N/A')}"
+            f"Issue: {(complaint.get('complaint_description') or '')[:100]}"
         )
         risk_summary = (
             f"Severity: {risk.get('severity', 'N/A')}, "
-            f"Risk: {risk.get('risk_level', 'N/A')}, "
+            f"Risk Level: {risk.get('risk_level', 'N/A')}, "
             f"Routing: {risk.get('suggested_routing', 'N/A')}"
         )
+
         prompt = ASSISTANT_REPLY_PROMPT.format(
             action=action,
             complaint_summary=complaint_summary,
@@ -224,19 +378,20 @@ def reply_node(state: AgentState) -> AgentState:
             updated_fields=", ".join(updated) if updated else "none",
             user_message=state["user_message"],
         )
-        llm = get_smart_llm()
+
+        llm = get_smart_llm(json_mode=False)
         response = llm.invoke([
             SystemMessage(content=prompt),
-            HumanMessage(content="Generate the assistant reply now."),
+            HumanMessage(content="Generate the assistant reply now. Be specific about what was extracted."),
         ])
         reply = response.content.strip().strip('"').strip("'")
         return {**state, "assistant_reply": reply}
     except Exception as e:
-        logger.error(f"reply_node error: {e}")
-        return {**state, "assistant_reply": f"Complaint processed. Action: {state.get('action_performed', 'complete')}."}
+        logger.error(f"[REPLY ERROR] {e}")
+        return {**state, "assistant_reply": f"Complaint processed successfully. Action: {state.get('action_performed', 'complete')}."}
 
 
-# ─── Routing Logic ────────────────────────────────────────────────────────────
+# ── Routing Logic ─────────────────────────────────────────────────────────────
 
 def route_by_intent(state: AgentState) -> str:
     mapping = {
@@ -248,7 +403,7 @@ def route_by_intent(state: AgentState) -> str:
     return mapping.get(state.get("intent", "LOG_NEW"), "log_complaint")
 
 
-# ─── Build Graph ──────────────────────────────────────────────────────────────
+# ── Build Graph ───────────────────────────────────────────────────────────────
 
 def build_complaint_graph():
     graph = StateGraph(AgentState)
@@ -262,7 +417,6 @@ def build_complaint_graph():
     graph.add_node("reply", reply_node)
 
     graph.set_entry_point("router")
-
     graph.add_conditional_edges(
         "router",
         route_by_intent,
@@ -273,10 +427,8 @@ def build_complaint_graph():
             "general_query": "general_query",
         },
     )
-
     for node in ["log_complaint", "edit_complaint", "extract_document", "general_query"]:
         graph.add_edge(node, "risk_assessment")
-
     graph.add_edge("risk_assessment", "reply")
     graph.add_edge("reply", END)
 
@@ -286,7 +438,7 @@ def build_complaint_graph():
 complaint_graph = build_complaint_graph()
 
 
-# ─── Public Invoke ────────────────────────────────────────────────────────────
+# ── Public Invoke ─────────────────────────────────────────────────────────────
 
 async def run_complaint_agent(
     user_message: str,
@@ -297,7 +449,6 @@ async def run_complaint_agent(
     file_mime_type: Optional[str] = None,
     user_role: str = "QA Manager",
 ) -> dict:
-    """Run the LangGraph complaint agent and return result state."""
     file_content = None
     if file_base64:
         try:
