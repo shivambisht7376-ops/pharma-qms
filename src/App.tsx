@@ -76,8 +76,8 @@ export default function App() {
     dispatch(setProcessing(true));
 
     try {
-      // Build camelCase → snake_case compatible payload
-      const currentComplaintPayload = complaint.customerName || complaint.productName ? {
+      // Always send current complaint state so EDIT_FIELDS has full context
+      const currentComplaintPayload = {
         customer_name: complaint.customerName,
         customer_type: complaint.customerType,
         reporter_contact: complaint.reporterContact,
@@ -94,7 +94,7 @@ export default function App() {
         storage_condition: complaint.storageCondition,
         adverse_event: complaint.adverseEvent,
         adverse_event_details: complaint.adverseEventDetails,
-      } : null;
+      };
 
       const currentRiskPayload = riskAssessment.severity ? {
         severity: riskAssessment.severity,
@@ -139,34 +139,66 @@ export default function App() {
       const risk = aiData.risk_assessment || {};
       const updatedFields: string[] = aiData.updated_fields || [];
 
-      // Merge with existing complaint
-      const generatedCompNo = complaint.complaintNumber || `CMP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
-      const updatedComplaint: ComplaintData = {
-        ...INITIAL_EMPTY_COMPLAINT,
-        ...complaint,
-        id: complaint.id || `cmp-${Date.now()}`,
-        complaintNumber: generatedCompNo,
-        status: complaint.status === 'Draft' ? 'Logged' : complaint.status,
-        dateLogged: complaint.dateLogged || new Date().toISOString().split('T')[0],
-        lastUpdated: new Date().toISOString().split('T')[0],
-        // Apply AI-extracted fields (only non-null ones)
-        ...(cmp.customer_name != null && { customerName: cmp.customer_name }),
-        ...(cmp.customer_type != null && { customerType: cmp.customer_type }),
-        ...(cmp.reporter_contact != null && { reporterContact: cmp.reporter_contact }),
-        ...(cmp.product_name != null && { productName: cmp.product_name }),
-        ...(cmp.product_type != null && { productType: cmp.product_type }),
-        ...(cmp.product_strength_grade != null && { productStrengthGrade: cmp.product_strength_grade }),
-        ...(cmp.batch_lot_number != null && { batchLotNumber: cmp.batch_lot_number }),
-        ...(cmp.mfg_date != null && { mfgDate: cmp.mfg_date }),
-        ...(cmp.exp_date != null && { expDate: cmp.exp_date }),
-        ...(cmp.affected_quantity != null && { affectedQuantity: cmp.affected_quantity }),
-        ...(cmp.complaint_description != null && { complaintDescription: cmp.complaint_description }),
-        ...(cmp.defect_category != null && { defectCategory: cmp.defect_category }),
-        ...(cmp.packaging_condition != null && { packagingCondition: cmp.packaging_condition }),
-        ...(cmp.storage_condition != null && { storageCondition: cmp.storage_condition }),
-        ...(cmp.adverse_event != null && { adverseEvent: cmp.adverse_event }),
-        ...(cmp.adverse_event_details != null && { adverseEventDetails: cmp.adverse_event_details }),
+      // ── Snake→Camel mapping helper ──────────────────────────────────────
+      const snakeToCamel: Record<string, keyof ComplaintData> = {
+        customer_name: 'customerName',
+        customer_type: 'customerType',
+        reporter_contact: 'reporterContact',
+        product_name: 'productName',
+        product_type: 'productType',
+        product_strength_grade: 'productStrengthGrade',
+        batch_lot_number: 'batchLotNumber',
+        mfg_date: 'mfgDate',
+        exp_date: 'expDate',
+        affected_quantity: 'affectedQuantity',
+        complaint_description: 'complaintDescription',
+        defect_category: 'defectCategory',
+        packaging_condition: 'packagingCondition',
+        storage_condition: 'storageCondition',
+        adverse_event: 'adverseEvent',
+        adverse_event_details: 'adverseEventDetails',
       };
+
+      const generatedCompNo = complaint.complaintNumber || `CMP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const action = aiData.action_performed || 'LOG_NEW';
+
+      let updatedComplaint: ComplaintData;
+
+      if (action === 'EDIT_FIELDS') {
+        // ── EDIT: delta-merge — only touch the fields the AI actually changed ──
+        // This prevents the AI from wiping fields it didn't receive/reproduce
+        const delta: Partial<ComplaintData> = {};
+        for (const snakeKey of updatedFields) {
+          const camelKey = snakeToCamel[snakeKey];
+          if (camelKey && cmp[snakeKey] !== undefined && cmp[snakeKey] !== null) {
+            (delta as any)[camelKey] = cmp[snakeKey];
+          }
+        }
+        updatedComplaint = {
+          ...complaint,       // keep ALL existing values
+          ...delta,           // only overwrite the changed fields
+          lastUpdated: new Date().toISOString().split('T')[0],
+        };
+      } else {
+        // ── LOG_NEW / EXTRACT_DOCUMENT: full merge of all non-empty fields ──
+        const extracted: Partial<ComplaintData> = {};
+        for (const [snakeKey, camelKey] of Object.entries(snakeToCamel)) {
+          const val = cmp[snakeKey];
+          if (val !== null && val !== undefined && val !== '') {
+            (extracted as any)[camelKey] = val;
+          }
+        }
+        updatedComplaint = {
+          ...INITIAL_EMPTY_COMPLAINT,
+          ...complaint,
+          id: complaint.id || `cmp-${Date.now()}`,
+          complaintNumber: generatedCompNo,
+          status: complaint.status === 'Draft' ? 'Logged' : complaint.status,
+          dateLogged: complaint.dateLogged || new Date().toISOString().split('T')[0],
+          lastUpdated: new Date().toISOString().split('T')[0],
+          ...extracted,
+        };
+      }
 
       const updatedRisk: RiskAssessment = {
         ...INITIAL_EMPTY_RISK,

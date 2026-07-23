@@ -229,37 +229,53 @@ Extract every detail you can find in the user message.
 
 
 def edit_complaint_node(state: AgentState) -> AgentState:
-    """Updates only the fields specified by the user, preserving all others."""
+    """
+    Updates ONLY the fields the user mentioned.
+    Returns a delta (only changed fields + their new values).
+    Python merges the delta onto the existing complaint — the LLM never
+    needs to reproduce the full complaint, preventing data loss.
+    """
     try:
         current = state.get("current_complaint") or {}
         current_merged = {**EMPTY_COMPLAINT, **current}
 
-        prompt = EDIT_COMPLAINT_PROMPT.format(
-            current_complaint=json.dumps(current_merged, indent=2)
-        ) + """
+        # Ask LLM only for the CHANGED fields — not the entire complaint
+        edit_prompt = f"""You are a pharmaceutical QMS field editor.
 
-CRITICAL: You MUST respond with ONLY a JSON object. No markdown, no explanation.
-Format EXACTLY:
-{
-  "updated_complaint": { ...complete complaint with all fields... },
-  "updated_fields": ["field_name_1", "field_name_2"]
-}
-"""
+CURRENT COMPLAINT STATE:
+{json.dumps(current_merged, indent=2)}
+
+The user wants to make an edit. Extract ONLY the fields they want to change.
+
+RULES:
+1. Return ONLY the fields mentioned by the user — do not include unchanged fields
+2. Use the exact same snake_case key names from the schema
+3. The allowed field names are: customer_name, customer_type, reporter_contact, product_name,
+   product_type, product_strength_grade, batch_lot_number, mfg_date, exp_date,
+   affected_quantity, complaint_description, defect_category, packaging_condition,
+   storage_condition, adverse_event, adverse_event_details
+
+CRITICAL: Respond with ONLY a JSON object containing ONLY the changed fields.
+Example: If user changes quantity, return: {{"affected_quantity": "50 bottles"}}
+Do NOT include unchanged fields. Do NOT add markdown or explanation."""
+
         llm = get_smart_llm(json_mode=True)
         response = llm.invoke([
-            SystemMessage(content=prompt),
-            HumanMessage(content=f"User edit request: {state['user_message']}"),
+            SystemMessage(content=edit_prompt),
+            HumanMessage(content=f"User edit: {state['user_message']}"),
         ])
 
-        logger.info(f"[EDIT_COMPLAINT] Raw LLM: {response.content[:300]}")
-        result = _extract_json(response.content)
+        logger.info(f"[EDIT_COMPLAINT] Delta from LLM: {response.content[:300]}")
+        delta = _extract_json(response.content)
 
-        updated_complaint = result.get("updated_complaint") or current_merged
-        updated_fields = result.get("updated_fields") or []
+        # Merge delta onto existing — NEVER replace everything
+        updated_complaint = {**current_merged, **delta}
+        updated_fields = list(delta.keys())
 
+        logger.info(f"[EDIT_COMPLAINT] Updated fields: {updated_fields}")
         return {
             **state,
-            "extracted_complaint": {**EMPTY_COMPLAINT, **updated_complaint},
+            "extracted_complaint": updated_complaint,
             "updated_fields": updated_fields,
             "action_performed": "EDIT_FIELDS",
         }

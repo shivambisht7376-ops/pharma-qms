@@ -181,7 +181,7 @@ export const AiCopilotAssistant: React.FC<AiCopilotAssistantProps> = ({
       )}
 
       {/* Chat Messages Log Scrollable Area */}
-      <div className="flex-1 overflow-y-auto my-4 space-y-4 pr-1.5 text-xs">
+      <div className="flex-1 min-h-0 overflow-y-auto my-4 space-y-4 pr-1.5 text-xs scroll-smooth">
         {chatHistory.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-400 space-y-3">
             <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center text-blue-400 border border-slate-700">
